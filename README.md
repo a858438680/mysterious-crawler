@@ -4,15 +4,15 @@
 Stay away from your parents and girlfriend when use this!
 
 ## Installation
-This program depends python3 and python3-request
+This program depends python3 and python3-requests
 
 Install python3-requests with pip:
 ```
-pip install request
+pip install requests
 ```
 or with your package manager, such as:
 ```
-sudo apt install python3-request
+sudo apt install python3-requests
 ```
 
 And clone this repository or download the zip
