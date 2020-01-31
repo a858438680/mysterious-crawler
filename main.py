@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import base64
 import functools
 import json
@@ -5,8 +7,10 @@ import os
 import random
 import requests
 import sqlite3
+import sys
 import time
 from CustomParser import ListParser
+
 
 class relax(object):
     def sleep(self, base=0.3, rand=True, ratio=0.3, relax_seg=((120, 10), (900, 120), (3600, 1200))):
@@ -14,7 +18,9 @@ class relax(object):
         self.rand = rand
         self.ratio = ratio
         self.relax_seg = relax_seg = reversed(relax_seg)
+        self.time = 0
         self.count = [0 for x in relax_seg]
+
         def decorator(func):
             @functools.wraps(func)
             def wrapper(*args, **kw):
@@ -29,20 +35,24 @@ class relax(object):
                 ret = func(*args, **kw)
                 end = time.time()
                 delta = end - start
-                for count in self.count:
-                    count = count + delta
+                self.time = self.time + delta
+                print('total: ', self.time, 's')
+                for i in range(len(self.count)):
+                    self.count[i] = self.count[i] + delta
                 for i, total, sleep_time in enumerate(relax_seg):
                     if self.count[i] > total:
-                        for count in self.count[i+1:]:
-                            count = 0
+                        for j in range(i+1, len(self.count)):
+                            self.count[j] = 0
+                        print('sleep for ', sleep_time, 's')
                         time.sleep(sleep_time)
                 return ret
             return wrapper
         return decorator
 
+
 r = relax()
 
-@r.sleep()
+
 def get_url(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:72.0) Gecko/20100101 Firefox/72.0'}
@@ -82,10 +92,7 @@ def get_collects(url):
     urls = main_parser.result[1][:]
     totals = [int(count[:-1]) for count in main_parser.result[2][:]]
 
-    domain = base64.b64decode(b'aHR0cHM6Ly93d3cubWVpdHVyaS5jb20=').decode('utf-8')
-    paths.pop()
-    path_attrs.pop()
-    dests.pop()
+    domain = 'https://www.meituri.com'
     for page in main_parser.result[3][1:-1]:
         page_url = domain + page
         page_response = get_url(page_url)
@@ -96,7 +103,7 @@ def get_collects(url):
 
         collects.extend(page_parser.result[0])
         urls.extend(page_parser.result[1])
-        totals.extend([int(count[:-1]) for count in main_parser.result[2][:]])
+        totals.extend([int(count[:-1]) for count in page_parser.result[2][:]])
 
     return (collects, urls, totals)
 
@@ -121,11 +128,9 @@ def get_imgs(url):
 
     img_urls = first_parser.result[0][:]
     img_names = first_parser.result[1][:]
+    pages = first_parser.result[1][1:-1]
 
-    paths.pop()
-    path_attrs.pop()
-    dests.pop()
-    for page_url in first_parser.result[2][1:-1]:
+    def add_page(page_url):
         page_response = get_url(page_url)
         page_response.encoding = 'utf-8'
 
@@ -134,6 +139,14 @@ def get_imgs(url):
 
         img_urls.extend(page_parser.result[0])
         img_names.extend(page_parser.result[1])
+
+        for new_url in page_parser.result[2][1:-1]:
+            if new_url not in pages:
+                pages.append(new_url)
+                add_page(new_url)
+
+    for page_url in first_parser.result[2][1:-1]:
+        add_page(page_url)
 
     return (img_names, img_urls)
 
@@ -144,6 +157,15 @@ def download_img(path, url):
         for chunk in img.iter_content(4096):
             f.write(chunk)
     print('download complete: ' + path)
+
+
+def validate(name):
+    specials = '/\\:*?"<>|'
+    ret = name
+    for c in specials:
+        ret = ret.replace(c, '-')
+    ret = ret.strip()
+    return ret
 
 
 class MetaData(object):
@@ -173,7 +195,7 @@ class MetaData(object):
         data = [(names[i], urls[i], totals[i]) for i in range(len(names))]
         cursor = self.conn.cursor()
         cursor.executemany('''
-            insert or ignore into collections(name, url, total) values(?, ?, ?)
+            insert or replace into collections(name, url, total) values(?, ?, ?)
         ''', data)
         self.conn.commit()
 
@@ -199,27 +221,39 @@ class MetaData(object):
             if count < total:
                 img_names, img_urls = get_imgs(url)
                 self.add_image(name, img_names, img_urls)
-            imgs = self.conn.cursor()
-            imgs.execute('''
-            select name, url, ok
+            ok_count = self.conn.cursor()
+            ok_count.execute('''
+            select count(*)
             from images
             where collect_name = ?
+            and ok = true
             ''', (name, ))
-            if not os.path.exists(name):
-                os.mkdir(name)
-            for img_name, img_url, img_ok in imgs:
-                if not img_ok:
-                    download_img(os.path.join(name, img_name+'.jpg'), img_url)
-                    update = self.conn.cursor()
-                    update.execute('''
-                    update images
-                    set ok = true
-                    where collect_name = ?
-                    and name = ?''', (name, img_name))
-                    self.count = self.count + 1
-                    if (self.count % 10 == 0):
-                        self.conn.commit()
-                        self.count = 0
+            ok_count = ok_count.fetchone()[0]
+            if ok_count == total:
+                continue
+            imgs = self.conn.cursor()
+            imgs.execute('''
+            select name, url
+            from images
+            where collect_name = ?
+            and ok = false
+            ''', (name, ))
+            v_name = validate(name)
+            if not os.path.exists(v_name):
+                os.mkdir(v_name)
+            for img_name, img_url in imgs:
+                v_img_name = validate(img_name)
+                download_img(os.path.join(v_name, v_img_name+'.jpg'), img_url)
+                update = self.conn.cursor()
+                update.execute('''
+                update images
+                set ok = true
+                where collect_name = ?
+                and name = ?''', (name, img_name))
+                self.count = self.count + 1
+                if (self.count % 10 == 0):
+                    self.conn.commit()
+                    self.count = 0
             self.conn.commit()
 
     def close(self):
@@ -230,10 +264,48 @@ class MetaData(object):
 if __name__ == '__main__':
     try:
         meta = MetaData('meta.db')
-        meta.finish()
-
-        collects, urls, totals = get_collects(base64.b64decode(b'aHR0cHM6Ly93d3cubWVpdHVyaS5jb20veC84Ni8=').decode('utf-8'))
-        meta.add_collect(collects, urls, totals)
+        collect_urls = [
+            'https://www.meituri.com/x/37/',
+            'https://www.meituri.com/x/82/',
+            'https://www.meituri.com/x/86/',
+            'https://www.meituri.com/x/95/',
+            'https://www.meituri.com/t/459/',
+            'https://www.meituri.com/t/786/',
+            'https://www.meituri.com/t/797/',
+            'https://www.meituri.com/t/2434/',
+            'https://www.meituri.com/t/4640/',
+            'https://www.meituri.com/t/5105/',
+            'https://www.meituri.com/t/5108/',
+            'https://www.meituri.com/t/5109/',
+            'https://www.meituri.com/t/5110/',
+            'https://www.meituri.com/t/5178/',
+            'https://www.meituri.com/t/5495/',
+            'https://www.meituri.com/t/5496/',
+            'https://www.meituri.com/t/5497/',
+            'https://www.meituri.com/t/5498/',
+            'https://www.meituri.com/t/5499/',
+            'https://www.meituri.com/t/5500/',
+            'https://www.meituri.com/t/5501/',
+            'https://www.meituri.com/t/5502/',
+            'https://www.meituri.com/t/5503/',
+            'https://www.meituri.com/t/5504/',
+            'https://www.meituri.com/t/5505/',
+            'https://www.meituri.com/t/5506/',
+            'https://www.meituri.com/t/5507/',
+            'https://www.meituri.com/t/5508/',
+            'https://www.meituri.com/t/5509/',
+            'https://www.meituri.com/t/5510/',
+            'https://www.meituri.com/t/5511/',
+            'https://www.meituri.com/t/5512/',
+            'https://www.meituri.com/t/5513/',
+            'https://www.meituri.com/t/5514/',
+            'https://www.meituri.com/t/5515/',
+            'https://www.meituri.com/t/5516/',
+            'https://www.meituri.com/t/5521/'
+        ]
+        for collect_url in collect_urls:
+            collects, urls, totals = get_collects(collect_url)
+            meta.add_collect(collects, urls, totals)
         meta.finish()
         meta.close()
     except KeyboardInterrupt:
